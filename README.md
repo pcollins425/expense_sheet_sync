@@ -94,3 +94,5 @@ Google Sheets allows **60 read and 60 write requests/minute/user** (same OAuth u
 - **Outbound watcher:** one column-A read per queue drain cycle, batched row updates/appends per claimed batch, optional pause between batches (`EXPENSE_SHEET_BATCH_PAUSE_SECONDS`, default 1). Retries on 429 (`EXPENSE_SHEET_RETRY_SECONDS`, default 15).
 
 If the ref watcher fans out many ESL refreshes, the outbound queue may backlog — that is normal; batches pause to stay under quota.
+
+**Planned (see `PLANNING.md`):** replace fan-out with scoped `findReplace` on `root`; supervisor-owned new GL on sheet.
