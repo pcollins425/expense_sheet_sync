@@ -24,8 +24,8 @@ from datetime import datetime, timezone
 from config import load_env
 from db import get_engine
 from google_creds import sheets_service
-from poll import poll_account_select, poll_casinos, poll_states, poll_tribes
-from sheets_write import write_tab
+from poll import poll_all
+from sheets_write import batch_write_tabs
 from snapshot import save_snapshot
 from sql_fetch import fetch_account_select, fetch_casinos, fetch_states, fetch_tribes
 
@@ -46,12 +46,15 @@ def bootstrap(engine, service) -> None:
         ("Casinos", fetch_casinos, "sql_casinos"),
         ("account_select", fetch_account_select, "sql_account_select"),
     ]
+    batch: dict[str, list[list[str]]] = {}
     for tab, fn, snap in jobs:
         values, index = fn(engine)
-        write_tab(service, tab, values)
+        batch[tab] = values
         save_snapshot(snap, {"rows": index})
-        print(f"{_utc()} bootstrap {tab}: {len(values) - 1} row(s)")
-    print(f"{_utc()} bootstrap complete")
+        print(f"{_utc()} bootstrap {tab}: {len(values) - 1} row(s) (queued)")
+
+    batch_write_tabs(service, batch)
+    print(f"{_utc()} bootstrap complete ({len(batch)} tab(s), 1 batch write)")
 
 
 def main() -> None:
@@ -80,11 +83,7 @@ def main() -> None:
 
     while True:
         try:
-            logs: list[str] = []
-            logs.extend(poll_states(engine, service))
-            logs.extend(poll_tribes(engine, service))
-            logs.extend(poll_casinos(engine, service))
-            logs.extend(poll_account_select(engine, service))
+            logs = poll_all(engine, service)
             if logs:
                 for line in logs:
                     print(f"{_utc()} {line}")
@@ -101,7 +100,8 @@ def main() -> None:
             print(traceback.format_exc())
             if args.once:
                 sys.exit(1)
-            time.sleep(min(poll_sec, 10.0))
+            backoff = _float_env("EXPENSE_SHEET_REF_ERROR_BACKOFF_SECONDS", 60.0)
+            time.sleep(backoff)
 
 
 if __name__ == "__main__":

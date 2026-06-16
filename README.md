@@ -87,3 +87,5 @@ Polls SQL every `EXPENSE_SHEET_REF_POLL_SECONDS` (default 30). When reference da
 | `finance.expense_account_gl_display` | `account_select` |
 
 Snapshots persist in Docker volume `expense-sheet-ref-state`.
+
+Google Sheets allows **60 write requests/minute/user**. The ref watcher batches tab updates into **one** `batchUpdate` per poll. On HTTP 429 it backs off and retries (`EXPENSE_SHEET_REF_RETRY_SECONDS`, default 15). Run **`--bootstrap` once** after deploy so the first poll cycle does not rewrite every tab.
