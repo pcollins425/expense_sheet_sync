@@ -8,6 +8,8 @@ Polls `finance.expense_sheet_out_queue` and writes rows to Google Sheets from `f
   - `2026-06-16_finance_expense_supervisor_line.sql`
   - `2026-06-16_finance_expense_sheet_queues.sql`
   - `2026-06-16_finance_vw_expense_supervisor_sheet.sql`
+- SQL grants for watcher login (`MSSQL_USER` in `secrets/.env`):
+  - `sql/grant_expense_sheet_watcher.sql` (run on `dgs_application_db` with privileged login)
 - ESL backfill complete (`scripts/backfill_expense_supervisor_line.py --apply`)
 - Google OAuth refresh token with **Spreadsheets** scope (master credentials `GMAIL_*`)
 - Service account or user must have **edit** access to the target spreadsheet
@@ -22,7 +24,6 @@ Polls `finance.expense_sheet_out_queue` and writes rows to Google Sheets from `f
 ## Setup
 
 ```bash
-cd deploy/expense_sheet_sync
 cp secrets/.env.example secrets/.env   # create manually on Windows if needed
 # Edit secrets/.env — MSSQL_* + GMAIL_* + EXPENSE_SHEET_*
 

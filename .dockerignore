@@ -1,0 +1,7 @@
+# Build context is this directory only.
+**/secrets/**
+!**/secrets/.gitkeep
+!**/secrets/.env.example
+**/__pycache__
+**/*.pyc
+**/.venv
