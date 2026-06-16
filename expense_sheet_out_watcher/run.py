@@ -24,10 +24,9 @@ from db import get_engine
 from google_creds import sheets_service
 from sheets_publish import (
     bootstrap_all,
-    delete_row,
+    col_a_index,
     ensure_tab_and_headers,
-    parse_payload,
-    upsert_row,
+    publish_batch,
 )
 
 CLAIM_SQL = """
@@ -105,22 +104,33 @@ def backoff_fail(engine, queue_id: int, err: str, max_attempts: int) -> None:
         )
 
 
-def process_one(engine, service, row: dict, *, max_attempts: int, index_cache: dict) -> None:
-    qid = int(row["queue_id"])
-    hub_key = (row["hub_reference_key"] or "").strip()
-    payload_raw = row["payload"] or "{}"
-    try:
-        payload = parse_payload(payload_raw if isinstance(payload_raw, str) else str(payload_raw))
-        op = (payload.get("op") or "update").strip().lower()
-        if op == "delete":
-            delete_row(service, hub_key, index_cache=index_cache)
-        else:
-            upsert_row(service, engine, hub_key, index_cache=index_cache)
-        delete_done(engine, qid)
-        print(f"{_utc_stamp()} queue_id={qid} hub={hub_key!r} op={op} ok")
-    except Exception as e:
-        backoff_fail(engine, qid, f"{type(e).__name__}: {e}", max_attempts)
-        print(f"{_utc_stamp()} queue_id={qid} hub={hub_key!r} FAILED: {e}")
+def process_batch(
+    engine,
+    service,
+    rows: list[dict],
+    *,
+    max_attempts: int,
+    index_cache: dict[str, int],
+) -> None:
+    results = publish_batch(service, engine, rows, index_cache)
+    for item, err in results:
+        if err is None:
+            delete_done(engine, item.queue_id)
+            print(
+                f"{_utc_stamp()} queue_id={item.queue_id} hub={item.hub_key!r} "
+                f"op={item.op} ok"
+            )
+            continue
+        backoff_fail(
+            engine,
+            item.queue_id,
+            f"{type(err).__name__}: {err}",
+            max_attempts,
+        )
+        print(
+            f"{_utc_stamp()} queue_id={item.queue_id} hub={item.hub_key!r} "
+            f"FAILED: {err}"
+        )
         print(traceback.format_exc())
         cd = _float_env("EXPENSE_SHEET_FAIL_COOLDOWN_SECONDS", 5.0)
         if cd > 0:
@@ -141,6 +151,7 @@ def main() -> None:
     poll = _float_env("EXPENSE_SHEET_POLL_SECONDS", 15.0)
     batch = _int_env("EXPENSE_SHEET_BATCH_SIZE", 20)
     max_attempts = _int_env("EXPENSE_SHEET_MAX_ATTEMPTS", 10)
+    batch_pause = _float_env("EXPENSE_SHEET_BATCH_PAUSE_SECONDS", 1.0)
 
     engine = get_engine()
     service = sheets_service()
@@ -159,29 +170,40 @@ def main() -> None:
         f"sheet={sheet_id()} tab={sheet_tab()!r} max_attempts={max_attempts}"
     )
 
+    index_cache: dict[str, int] | None = None
+
     while True:
         try:
             rows = claim_batch(engine, batch)
             if not rows:
+                index_cache = None
                 if args.once:
                     break
                 time.sleep(poll)
                 continue
+
+            if index_cache is None:
+                index_cache = col_a_index(service)
+
             print(f"{_utc_stamp()} claimed {len(rows)} row(s)")
-            for row in rows:
-                process_one(
-                    engine,
-                    service,
-                    row,
-                    max_attempts=max_attempts,
-                    index_cache=None,
-                )
+            process_batch(
+                engine,
+                service,
+                rows,
+                max_attempts=max_attempts,
+                index_cache=index_cache,
+            )
+
+            if batch_pause > 0:
+                time.sleep(batch_pause)
+
             if args.once:
                 break
         except KeyboardInterrupt:
             print(f"{_utc_stamp()} exiting (KeyboardInterrupt)")
             sys.exit(0)
         except Exception as e:
+            index_cache = None
             print(f"{_utc_stamp()} loop error: {e}")
             print(traceback.format_exc())
             if args.once:

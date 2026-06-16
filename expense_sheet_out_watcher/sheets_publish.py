@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -11,8 +14,6 @@ from googleapiclient.errors import HttpError
 from sqlalchemy import text
 
 from config import sheet_id, sheet_tab
-from db import get_engine
-from google_creds import sheets_service
 
 HEADERS = [
     "reference_key",
@@ -29,6 +30,8 @@ HEADERS = [
 ]
 
 LAST_COL = "K"
+_BLANK_ROW = [[""] * len(HEADERS)]
+_UPDATED_RANGE_RE = re.compile(r"!A(\d+)", re.IGNORECASE)
 
 ROW_SQL = text(
     """
@@ -48,6 +51,14 @@ ROW_SQL = text(
     WHERE esl_reference_key = :hub_key
     """
 )
+
+
+@dataclass
+class PreparedItem:
+    queue_id: int
+    hub_key: str
+    op: str
+    row_data: dict[str, Any] | None = None
 
 
 def _escape_tab(title: str) -> str:
@@ -82,6 +93,31 @@ def _row_values(mapping: dict[str, Any]) -> list[str]:
     ]
 
 
+def _retry_seconds() -> float:
+    return float(os.environ.get("EXPENSE_SHEET_RETRY_SECONDS", "15"))
+
+
+def _max_retries() -> int:
+    return int(os.environ.get("EXPENSE_SHEET_MAX_RETRIES", "6"))
+
+
+def _execute_with_retry(fn, *, what: str):
+    max_attempts = _max_retries()
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except HttpError as e:
+            if e.resp.status == 429 and attempt < max_attempts - 1:
+                wait = _retry_seconds() * (2**attempt)
+                print(
+                    f"Sheets 429 on {what}; retry {attempt + 1}/{max_attempts - 1} "
+                    f"in {wait:.0f}s"
+                )
+                time.sleep(wait)
+                continue
+            raise
+
+
 def fetch_row(engine, hub_key: str) -> dict[str, Any] | None:
     with engine.connect() as conn:
         r = conn.execute(ROW_SQL, {"hub_key": hub_key}).mappings().first()
@@ -91,40 +127,49 @@ def fetch_row(engine, hub_key: str) -> dict[str, Any] | None:
 def ensure_tab_and_headers(service) -> None:
     sid = sheet_id()
     tab = sheet_tab()
-    meta = service.spreadsheets().get(spreadsheetId=sid).execute()
+    meta = _execute_with_retry(
+        lambda: service.spreadsheets().get(spreadsheetId=sid).execute(),
+        what="spreadsheet metadata",
+    )
     sheet_meta = None
     for s in meta.get("sheets", []):
         if s["properties"]["title"] == tab:
             sheet_meta = s["properties"]
             break
     if sheet_meta is None:
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=sid,
-            body={
-                "requests": [
-                    {"addSheet": {"properties": {"title": tab}}}
-                ]
-            },
-        ).execute()
-        sheet_id_internal = None
-    else:
-        sheet_id_internal = sheet_meta["sheetId"]
+        _execute_with_retry(
+            lambda: service.spreadsheets()
+            .batchUpdate(
+                spreadsheetId=sid,
+                body={"requests": [{"addSheet": {"properties": {"title": tab}}}]},
+            )
+            .execute(),
+            what=f"add tab {tab}",
+        )
 
     rng = f"{_escape_tab(tab)}!A1:{LAST_COL}1"
-    service.spreadsheets().values().update(
-        spreadsheetId=sid,
-        range=rng,
-        valueInputOption="RAW",
-        body={"values": [HEADERS]},
-    ).execute()
-    return sheet_id_internal
+    _execute_with_retry(
+        lambda: service.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=sid,
+            range=rng,
+            valueInputOption="RAW",
+            body={"values": [HEADERS]},
+        )
+        .execute(),
+        what=f"write headers on {tab}",
+    )
 
 
 def ensure_grid_rows(service, min_rows: int) -> None:
     """Expand the target tab so bootstrap fits (default new sheets are often 1000 rows)."""
     sid = sheet_id()
     tab = sheet_tab()
-    meta = service.spreadsheets().get(spreadsheetId=sid).execute()
+    meta = _execute_with_retry(
+        lambda: service.spreadsheets().get(spreadsheetId=sid).execute(),
+        what="spreadsheet metadata",
+    )
     for s in meta.get("sheets", []):
         props = s["properties"]
         if props["title"] != tab:
@@ -133,34 +178,38 @@ def ensure_grid_rows(service, min_rows: int) -> None:
         needed = max(current, min_rows + 10)
         if needed <= current:
             return
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=sid,
-            body={
-                "requests": [
-                    {
-                        "updateSheetProperties": {
-                            "properties": {
-                                "sheetId": props["sheetId"],
-                                "gridProperties": {"rowCount": needed},
-                            },
-                            "fields": "gridProperties.rowCount",
+        _execute_with_retry(
+            lambda: service.spreadsheets()
+            .batchUpdate(
+                spreadsheetId=sid,
+                body={
+                    "requests": [
+                        {
+                            "updateSheetProperties": {
+                                "properties": {
+                                    "sheetId": props["sheetId"],
+                                    "gridProperties": {"rowCount": needed},
+                                },
+                                "fields": "gridProperties.rowCount",
+                            }
                         }
-                    }
-                ]
-            },
-        ).execute()
+                    ]
+                },
+            )
+            .execute(),
+            what=f"expand {tab} rows",
+        )
         return
 
 
-def _col_a_index(service) -> dict[str, int]:
+def col_a_index(service) -> dict[str, int]:
+    """One read of column A per batch — maps ESL reference_key -> sheet row number."""
     sid = sheet_id()
     tab = sheet_tab()
     rng = f"{_escape_tab(tab)}!A:A"
-    result = (
-        service.spreadsheets()
-        .values()
-        .get(spreadsheetId=sid, range=rng)
-        .execute()
+    result = _execute_with_retry(
+        lambda: service.spreadsheets().values().get(spreadsheetId=sid, range=rng).execute(),
+        what=f"read {tab} column A",
     )
     out: dict[str, int] = {}
     for i, row in enumerate(result.get("values", []), start=1):
@@ -172,51 +221,172 @@ def _col_a_index(service) -> dict[str, int]:
     return out
 
 
+def _first_row_from_updated_range(updated_range: str) -> int:
+    m = _UPDATED_RANGE_RE.search(updated_range.replace("'", ""))
+    if not m:
+        raise ValueError(f"cannot parse updatedRange: {updated_range!r}")
+    return int(m.group(1))
+
+
+def _batch_values_update(service, data: list[dict[str, Any]]) -> None:
+    if not data:
+        return
+    sid = sheet_id()
+    _execute_with_retry(
+        lambda: service.spreadsheets()
+        .values()
+        .batchUpdate(
+            spreadsheetId=sid,
+            body={"valueInputOption": "RAW", "data": data},
+        )
+        .execute(),
+        what=f"batch update {len(data)} range(s)",
+    )
+
+
+def publish_batch(
+    service,
+    engine,
+    rows: list[dict],
+    index_cache: dict[str, int],
+) -> list[tuple[PreparedItem, Exception | None]]:
+    """Apply a claimed queue batch with one column-A read and batched writes."""
+    tab = _escape_tab(sheet_tab())
+    prepared: list[PreparedItem] = []
+    prep_errors: list[tuple[PreparedItem, Exception]] = []
+
+    for row in rows:
+        qid = int(row["queue_id"])
+        hub_key = (row["hub_reference_key"] or "").strip()
+        payload_raw = row["payload"] or "{}"
+        try:
+            payload = parse_payload(
+                payload_raw if isinstance(payload_raw, str) else str(payload_raw)
+            )
+            op = (payload.get("op") or "update").strip().lower()
+            row_data = None
+            if op != "delete":
+                row_data = fetch_row(engine, hub_key)
+                if row_data is None:
+                    raise ValueError(f"ESL row not found in database: {hub_key}")
+            prepared.append(
+                PreparedItem(queue_id=qid, hub_key=hub_key, op=op, row_data=row_data)
+            )
+        except Exception as e:
+            prep_errors.append(
+                (PreparedItem(queue_id=qid, hub_key=hub_key, op="error"), e)
+            )
+
+    results: list[tuple[PreparedItem, Exception | None]] = list(prep_errors)
+    if not prepared:
+        return results
+
+    batch_data: list[dict[str, Any]] = []
+    append_values: list[list[str]] = []
+    append_items: list[PreparedItem] = []
+
+    for item in prepared:
+        if item.op == "delete":
+            row_num = index_cache.get(item.hub_key)
+            if row_num is not None:
+                batch_data.append(
+                    {
+                        "range": f"{tab}!A{row_num}:{LAST_COL}{row_num}",
+                        "values": _BLANK_ROW,
+                    }
+                )
+            continue
+
+        assert item.row_data is not None
+        values = [_row_values(item.row_data)]
+        row_num = index_cache.get(item.hub_key)
+        if row_num is None:
+            append_values.extend(values)
+            append_items.append(item)
+        else:
+            batch_data.append(
+                {
+                    "range": f"{tab}!A{row_num}:{LAST_COL}{row_num}",
+                    "values": values,
+                }
+            )
+
+    try:
+        _batch_values_update(service, batch_data)
+        if append_values:
+            sid = sheet_id()
+            sheet_tab_name = sheet_tab()
+            append_rng = f"{_escape_tab(sheet_tab_name)}!A:{LAST_COL}"
+            result = _execute_with_retry(
+                lambda: service.spreadsheets()
+                .values()
+                .append(
+                    spreadsheetId=sid,
+                    range=append_rng,
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": append_values},
+                )
+                .execute(),
+                what=f"append {len(append_values)} row(s)",
+            )
+            updated_range = (result.get("updates") or {}).get("updatedRange") or ""
+            start_row = _first_row_from_updated_range(updated_range)
+            for offset, item in enumerate(append_items):
+                index_cache[item.hub_key] = start_row + offset
+
+        results.extend((item, None) for item in prepared)
+    except Exception as e:
+        results.extend((item, e) for item in prepared)
+
+    return results
+
+
 def upsert_row(service, engine, hub_key: str, index_cache: dict[str, int] | None = None) -> None:
     row = fetch_row(engine, hub_key)
     if row is None:
         raise ValueError(f"ESL row not found in database: {hub_key}")
 
-    sid = sheet_id()
-    tab = sheet_tab()
-    values = [_row_values(row)]
-    cache = index_cache if index_cache is not None else _col_a_index(service)
+    cache = index_cache if index_cache is not None else col_a_index(service)
+    tab = _escape_tab(sheet_tab())
     row_num = cache.get(hub_key)
-
+    values = [_row_values(row)]
     if row_num is None:
-        append_rng = f"{_escape_tab(tab)}!A:{LAST_COL}"
-        service.spreadsheets().values().append(
-            spreadsheetId=sid,
-            range=append_rng,
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": values},
-        ).execute()
+        sid = sheet_id()
+        append_rng = f"{tab}!A:{LAST_COL}"
+        result = _execute_with_retry(
+            lambda: service.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=sid,
+                range=append_rng,
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": values},
+            )
+            .execute(),
+            what=f"append {hub_key}",
+        )
+        updated_range = (result.get("updates") or {}).get("updatedRange") or ""
+        cache[hub_key] = _first_row_from_updated_range(updated_range)
         return
 
-    update_rng = f"{_escape_tab(tab)}!A{row_num}:{LAST_COL}{row_num}"
-    service.spreadsheets().values().update(
-        spreadsheetId=sid,
-        range=update_rng,
-        valueInputOption="RAW",
-        body={"values": values},
-    ).execute()
+    _batch_values_update(
+        service,
+        [{"range": f"{tab}!A{row_num}:{LAST_COL}{row_num}", "values": values}],
+    )
 
 
 def delete_row(service, hub_key: str, index_cache: dict[str, int] | None = None) -> None:
-    cache = index_cache if index_cache is not None else _col_a_index(service)
+    cache = index_cache if index_cache is not None else col_a_index(service)
     row_num = cache.get(hub_key)
     if row_num is None:
         return
-    sid = sheet_id()
-    tab = sheet_tab()
-    update_rng = f"{_escape_tab(tab)}!A{row_num}:{LAST_COL}{row_num}"
-    service.spreadsheets().values().update(
-        spreadsheetId=sid,
-        range=update_rng,
-        valueInputOption="RAW",
-        body={"values": [[""] * len(HEADERS)]},
-    ).execute()
+    tab = _escape_tab(sheet_tab())
+    _batch_values_update(
+        service,
+        [{"range": f"{tab}!A{row_num}:{LAST_COL}{row_num}", "values": _BLANK_ROW}],
+    )
 
 
 def bootstrap_all(engine, service) -> int:
@@ -258,18 +428,29 @@ def bootstrap_all(engine, service) -> int:
         row_start = start_row + i
         row_end = row_start + len(block) - 1
         rng = f"{_escape_tab(tab)}!A{row_start}:{LAST_COL}{row_end}"
-        service.spreadsheets().values().update(
+        _execute_with_retry(
+            lambda block=block, rng=rng: service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=sid,
+                range=rng,
+                valueInputOption="RAW",
+                body={"values": block},
+            )
+            .execute(),
+            what=f"bootstrap chunk rows {row_start}-{row_end}",
+        )
+    _execute_with_retry(
+        lambda: service.spreadsheets()
+        .values()
+        .clear(
             spreadsheetId=sid,
-            range=rng,
-            valueInputOption="RAW",
-            body={"values": block},
-        ).execute()
-    # Drop legacy 12th column from prior layout (expense Reference Key / shifted receipt).
-    service.spreadsheets().values().clear(
-        spreadsheetId=sid,
-        range=f"{_escape_tab(tab)}!L:L",
-        body={},
-    ).execute()
+            range=f"{_escape_tab(tab)}!L:L",
+            body={},
+        )
+        .execute(),
+        what=f"clear legacy column on {tab}",
+    )
     return len(values)
 
 

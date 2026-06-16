@@ -88,4 +88,9 @@ Polls SQL every `EXPENSE_SHEET_REF_POLL_SECONDS` (default 30). When reference da
 
 Snapshots persist in Docker volume `expense-sheet-ref-state`.
 
-Google Sheets allows **60 write requests/minute/user**. The ref watcher batches tab updates into **one** `batchUpdate` per poll. On HTTP 429 it backs off and retries (`EXPENSE_SHEET_REF_RETRY_SECONDS`, default 15). Run **`--bootstrap` once** after deploy so the first poll cycle does not rewrite every tab.
+Google Sheets allows **60 read and 60 write requests/minute/user** (same OAuth user for both watchers).
+
+- **Ref watcher:** batches changed tabs into one `batchUpdate` per poll; retries on 429 (`EXPENSE_SHEET_REF_RETRY_SECONDS`, default 15). Run **`--bootstrap` once** after deploy.
+- **Outbound watcher:** one column-A read per queue drain cycle, batched row updates/appends per claimed batch, optional pause between batches (`EXPENSE_SHEET_BATCH_PAUSE_SECONDS`, default 1). Retries on 429 (`EXPENSE_SHEET_RETRY_SECONDS`, default 15).
+
+If the ref watcher fans out many ESL refreshes, the outbound queue may backlog — that is normal; batches pause to stay under quota.
