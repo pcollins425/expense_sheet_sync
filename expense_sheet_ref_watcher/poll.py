@@ -7,15 +7,17 @@ from sqlalchemy.engine import Engine
 
 from fan_out import enqueue_by_fk, enqueue_by_gl_code
 from sheets_write import write_tab
-from snapshot import load_snapshot, save_snapshot
+from snapshot import load_snapshot, normalize_rows, save_snapshot
 from sql_fetch import fetch_account_select, fetch_casinos, fetch_states, fetch_tribes
 
 
 def _changed_keys(
-    current: dict[str, tuple[str, ...]], previous: dict[str, tuple[str, ...]]
+    current: dict[str, tuple[str, ...]], previous: dict[str, tuple[str, ...] | list[str]]
 ) -> set[str]:
-    keys = set(current) | set(previous)
-    return {k for k in keys if current.get(k) != previous.get(k)}
+    prev = normalize_rows(previous) if previous else {}
+    cur = normalize_rows(current)
+    keys = set(cur) | set(prev)
+    return {k for k in keys if cur.get(k) != prev.get(k)}
 
 
 def _sync_table(
