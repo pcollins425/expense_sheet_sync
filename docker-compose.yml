@@ -1,0 +1,27 @@
+# ESL outbound sync: finance.expense_sheet_out_queue → Google Sheet.
+#
+# Prerequisites: deploy/expense_sheet_sync/secrets/.env (MSSQL_* + GMAIL_* + EXPENSE_SHEET_*)
+#
+#   docker compose up -d --build
+#   docker compose logs -f expense-sheet-out-watcher
+#
+# First-time full load (optional):
+#   docker compose run --rm expense-sheet-out-watcher python -u run.py --bootstrap
+
+services:
+  expense-sheet-out-watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: expense-sheet-sync:latest
+    env_file:
+      - secrets/.env
+    user: "${EXPENSE_SHEET_DOCKER_UID_GID:-1000:1000}"
+    volumes:
+      - ./secrets/.env:/app/secrets/.env:ro
+    environment:
+      MASTER_CREDENTIALS_ENV: /app/secrets/.env
+      TZ: ${TZ:-America/Chicago}
+    restart: unless-stopped
+    working_dir: /app/expense_sheet_out_watcher
+    command: ["python", "-u", "run.py"]
