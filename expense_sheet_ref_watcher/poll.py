@@ -1,200 +1,95 @@
-"""Diff reference tabs and apply SQL + queue fan-out."""
+"""Poll SQL reference tables and push changes to Google Sheet tabs."""
 from __future__ import annotations
 
-from sheets_io import parse_gl_account_label, read_tab, root_expense_map
+from collections.abc import Callable
+
+from sqlalchemy.engine import Engine
+
+from fan_out import enqueue_by_fk, enqueue_by_gl_code
+from sheets_write import write_tab
 from snapshot import load_snapshot, save_snapshot
-from sql_sync import (
-    sync_account_select_change,
-    sync_casino_change,
-    sync_root_expense_change,
-    sync_state_change,
-    sync_tribe_change,
-)
+from sql_fetch import fetch_account_select, fetch_casinos, fetch_states, fetch_tribes
 
 
-def _row_dict(headers: list[str], row: list[str]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for i, h in enumerate(headers):
-        key = h.strip()
-        if not key:
-            continue
-        out[key] = row[i].strip() if i < len(row) else ""
-    return out
+def _changed_keys(
+    current: dict[str, tuple[str, ...]], previous: dict[str, tuple[str, ...]]
+) -> set[str]:
+    keys = set(current) | set(previous)
+    return {k for k in keys if current.get(k) != previous.get(k)}
 
 
-def _diff_table(
-    tab: str, rows: list[list[str]], key_col: str
-) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
-    if not rows:
-        return {}, {}
-    headers = rows[0]
-    current: dict[str, dict[str, str]] = {}
-    for row in rows[1:]:
-        d = _row_dict(headers, row)
-        key = d.get(key_col, "").strip()
-        if key and key != key_col:
-            current[key] = d
-    previous = load_snapshot(tab)
-    prev_rows = previous.get("rows", {})
-    return current, prev_rows
-
-
-def _save_table(tab: str, rows: dict[str, dict[str, str]]) -> None:
-    save_snapshot(tab, {"rows": rows})
-
-
-def poll_account_select(engine, service) -> list[str]:
-    rows = read_tab(service, "account_select", "A:E")
-    current, previous = _diff_table("account_select", rows, "gl_code")
-    # rebuild keyed by gl_code from column A
-    current = {}
-    for row in rows[1:]:
-        if not row:
-            continue
-        parsed = parse_gl_account_label(row[0] if row else "")
-        if not parsed:
-            continue
-        code, name = parsed
-        current[code] = {
-            "gl_code": code,
-            "display_name": name,
-            "account_label": row[0],
-        }
-
-    previous_rows = load_snapshot("account_select").get("rows", {})
-    if not previous_rows:
-        _save_table("account_select", current)
-        return []
-
-    logs: list[str] = []
-    for code, data in current.items():
-        prev = previous_rows.get(code)
-        if prev and prev.get("display_name") == data["display_name"]:
-            continue
-        n = sync_account_select_change(
-            engine,
-            service,
-            code,
-            data["display_name"],
-            data["account_label"],
-        )
-        logs.append(f"account_select {code} -> queued ~{n} ESL row(s)")
-
-    _save_table("account_select", current)
-    return logs
-
-
-def poll_states(engine, service) -> list[str]:
-    rows = read_tab(service, "States", "A:C")
-    current, previous = _diff_table("States", rows, "reference_key")
+def _sync_table(
+    engine,
+    service,
+    *,
+    snapshot_name: str,
+    sheet_tab: str,
+    fetch_fn,
+    fan_out: Callable[[Engine, str], int] | None = None,
+) -> list[str]:
+    values, current = fetch_fn(engine)
+    previous = load_snapshot(snapshot_name).get("rows", {})
     if not previous:
-        _save_table("States", current)
+        save_snapshot(snapshot_name, {"rows": current})
         return []
-    logs: list[str] = []
-    for ref, data in current.items():
-        prev = previous.get(ref)
-        if prev == data:
-            continue
-        n = sync_state_change(
-            engine,
-            ref,
-            data.get("state_abbreviation", ""),
-            data.get("state", ""),
-        )
-        logs.append(f"States {ref} -> queued ~{n} ESL row(s)")
-    _save_table("States", current)
-    return logs
 
-
-def poll_tribes(engine, service) -> list[str]:
-    rows = read_tab(service, "Tribes", "A:E")
-    current, previous = _diff_table("Tribes", rows, "reference_key")
-    if not previous:
-        _save_table("Tribes", current)
+    changed = _changed_keys(current, previous)
+    if not changed:
         return []
-    logs: list[str] = []
-    for ref, data in current.items():
-        prev = previous.get(ref)
-        if prev == data:
-            continue
-        n = sync_tribe_change(
-            engine,
-            ref,
-            data.get("tribe_name", ""),
-            data.get("tribe_short", ""),
-            data.get("state_id", ""),
-        )
-        logs.append(f"Tribes {ref} -> queued ~{n} ESL row(s)")
-    _save_table("Tribes", current)
+
+    write_tab(service, sheet_tab, values)
+    logs = [f"{sheet_tab}: SQL change -> wrote {len(values) - 1} row(s)"]
+
+    if fan_out:
+        for key in sorted(changed):
+            if key not in current:
+                continue
+            n = fan_out(engine, key)
+            logs.append(f"{sheet_tab} {key} -> queued ~{n} ESL row(s)")
+
+    save_snapshot(snapshot_name, {"rows": current})
     return logs
 
 
-def poll_casinos(engine, service) -> list[str]:
-    rows = read_tab(service, "Casinos", "A:G")
-    current, previous = _diff_table("Casinos", rows, "reference_key")
-    if not previous:
-        _save_table("Casinos", current)
-        return []
-    logs: list[str] = []
-    for ref, data in current.items():
-        prev = previous.get(ref)
-        # Ignore denormalized tribe_name / state_abbreviation drift from SQL export
-        cmp_prev = dict(prev) if prev else None
-        cmp_data = {
-            k: data.get(k, "")
-            for k in (
-                "reference_key",
-                "casino_name",
-                "casino_short",
-                "tribe_id",
-                "state_id",
-            )
-        }
-        if cmp_prev:
-            cmp_prev = {k: cmp_prev.get(k, "") for k in cmp_data}
-        if cmp_prev == cmp_data:
-            continue
-        n = sync_casino_change(
-            engine,
-            ref,
-            data.get("casino_name", ""),
-            data.get("casino_short", ""),
-            data.get("tribe_id", ""),
-            data.get("state_id", ""),
-        )
-        logs.append(f"Casinos {ref} -> queued ~{n} ESL row(s)")
-    _save_table("Casinos", current)
-    return logs
+def poll_states(engine: Engine, service) -> list[str]:
+    return _sync_table(
+        engine,
+        service,
+        snapshot_name="sql_states",
+        sheet_tab="States",
+        fetch_fn=fetch_states,
+        fan_out=lambda eng, key: enqueue_by_fk(eng, "state", key),
+    )
 
 
-def poll_root_expense_accounts(engine, service, root_tab: str) -> list[str]:
-    rows = read_tab(service, root_tab, "A:K")
-    current = root_expense_map(rows)
-    previous = load_snapshot("root_expense").get("rows", {})
-    if not previous:
-        save_snapshot("root_expense", {"rows": current})
-        return []
-    logs: list[str] = []
-
-    for esl_key, label in current.items():
-        if previous.get(esl_key) == label:
-            continue
-        if not label:
-            continue
-        if sync_root_expense_change(engine, service, esl_key, label):
-            logs.append(f"root {esl_key} expense_account updated")
-        else:
-            logs.append(f"root {esl_key} expense_account skipped (invalid or no expense)")
-
-    save_snapshot("root_expense", {"rows": current})
-    return logs
+def poll_tribes(engine: Engine, service) -> list[str]:
+    return _sync_table(
+        engine,
+        service,
+        snapshot_name="sql_tribes",
+        sheet_tab="Tribes",
+        fetch_fn=fetch_tribes,
+        fan_out=lambda eng, key: enqueue_by_fk(eng, "tribe", key),
+    )
 
 
-def poll_all(engine, service, root_tab: str) -> list[str]:
-    logs: list[str] = []
-    logs.extend(poll_account_select(engine, service))
-    logs.extend(poll_states(engine, service))
-    logs.extend(poll_tribes(engine, service))
-    logs.extend(poll_casinos(engine, service))
-    logs.extend(poll_root_expense_accounts(engine, service, root_tab))
-    return logs
+def poll_casinos(engine: Engine, service) -> list[str]:
+    return _sync_table(
+        engine,
+        service,
+        snapshot_name="sql_casinos",
+        sheet_tab="Casinos",
+        fetch_fn=fetch_casinos,
+        fan_out=lambda eng, key: enqueue_by_fk(eng, "casino", key),
+    )
+
+
+def poll_account_select(engine: Engine, service) -> list[str]:
+    return _sync_table(
+        engine,
+        service,
+        snapshot_name="sql_account_select",
+        sheet_tab="account_select",
+        fetch_fn=fetch_account_select,
+        fan_out=lambda eng, key: enqueue_by_gl_code(eng, key),
+    )

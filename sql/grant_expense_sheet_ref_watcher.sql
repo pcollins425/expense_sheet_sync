@@ -1,4 +1,4 @@
--- Reference-tab sheet watcher (account_select, States, Tribes, Casinos, root expense account).
+-- Reference-tab watcher (SQL → Google Sheet): read clients.* + expense_account_gl_display.
 
 USE [dgs_application_db];
 GO
@@ -18,18 +18,15 @@ BEGIN
     BEGIN
         SET @sql = N'
 GRANT SELECT, UPDATE, DELETE ON [finance].[expense_sheet_out_queue] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT SELECT ON [finance].[vw_expense_supervisor_sheet] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT SELECT, UPDATE ON [finance].[expense_account_gl_display] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT SELECT, UPDATE ON [finance].[expenses] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT SELECT, UPDATE ON [finance].[expense_supervisor_line] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT SELECT, UPDATE ON [clients].[states] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT SELECT, UPDATE ON [clients].[tribes] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT SELECT, UPDATE ON [clients].[casinos] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT EXECUTE ON [finance].[usp_enqueue_expense_sheet_out_refresh] TO [' + REPLACE(@principal, N']', N']]') + N'];
+GRANT SELECT ON [finance].[expense_account_gl_display] TO [' + REPLACE(@principal, N']', N']]') + N'];
+GRANT SELECT ON [finance].[expense_supervisor_line] TO [' + REPLACE(@principal, N']', N']]') + N'];
+GRANT SELECT ON [clients].[states] TO [' + REPLACE(@principal, N']', N']]') + N'];
+GRANT SELECT ON [clients].[tribes] TO [' + REPLACE(@principal, N']', N']]') + N'];
+GRANT SELECT ON [clients].[casinos] TO [' + REPLACE(@principal, N']', N']]') + N'];
 GRANT EXECUTE ON [finance].[usp_enqueue_expense_sheet_out_by_gl_code] TO [' + REPLACE(@principal, N']', N']]') + N'];
 GRANT EXECUTE ON [finance].[usp_enqueue_expense_sheet_out_by_fk] TO [' + REPLACE(@principal, N']', N']]') + N'];';
         EXEC sp_executesql @sql;
-        PRINT N'Granted expense sheet ref watcher permissions to ' + @principal;
+        PRINT N'Granted SQL→Sheet ref watcher permissions to ' + @principal;
     END
     FETCH NEXT FROM c INTO @principal;
 END

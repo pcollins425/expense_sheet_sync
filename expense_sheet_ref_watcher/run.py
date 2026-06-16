@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Poll quickbooks_export reference tabs → SQL catalog / clients.* → enqueue ESL sheet refresh.
+Poll SQL reference tables → push quickbooks_export validation tabs → enqueue ESL refresh.
 
-Tabs: account_select, States, Tribes, Casinos, and Expense Account column on root.
+Sources:
+  clients.states   → States
+  clients.tribes   → Tribes
+  clients.casinos  → Casinos
+  finance.expense_account_gl_display → account_select
 
   python -u run.py
   python -u run.py --once
-  python -u run.py --seed-snapshots   # baseline without applying changes
+  python -u run.py --bootstrap   # force full tab write from SQL (no fan-out)
 """
 from __future__ import annotations
 
@@ -17,18 +21,13 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-from config import load_env, root_tab
+from config import load_env
 from db import get_engine
 from google_creds import sheets_service
-from poll import (
-    poll_account_select,
-    poll_casinos,
-    poll_root_expense_accounts,
-    poll_states,
-    poll_tribes,
-)
-from sheets_io import parse_gl_account_label, read_tab, root_expense_map
+from poll import poll_account_select, poll_casinos, poll_states, poll_tribes
+from sheets_write import write_tab
 from snapshot import save_snapshot
+from sql_fetch import fetch_account_select, fetch_casinos, fetch_states, fetch_tribes
 
 
 def _utc() -> str:
@@ -40,77 +39,57 @@ def _float_env(key: str, default: float) -> float:
     return default if raw == "" else float(raw)
 
 
-def seed_snapshots(service, tab_root: str) -> None:
-    # account_select
-    rows = read_tab(service, "account_select", "A:A")
-    acct: dict[str, dict[str, str]] = {}
-    for row in rows[1:]:
-        if not row:
-            continue
-        parsed = parse_gl_account_label(row[0])
-        if not parsed:
-            continue
-        code, name = parsed
-        acct[code] = {"gl_code": code, "display_name": name, "account_label": row[0]}
-    save_snapshot("account_select", {"rows": acct})
-
-    for tab, key in [("States", "reference_key"), ("Tribes", "reference_key"), ("Casinos", "reference_key")]:
-        data = read_tab(service, tab)
-        if not data:
-            save_snapshot(tab, {"rows": {}})
-            continue
-        headers = data[0]
-        out: dict[str, dict[str, str]] = {}
-        for row in data[1:]:
-            d = {headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
-            k = d.get(key, "").strip()
-            if k:
-                out[k] = d
-        save_snapshot(tab, {"rows": out})
-
-    root_rows = read_tab(service, tab_root, "A:K")
-    save_snapshot("root_expense", {"rows": root_expense_map(root_rows)})
-    print(f"{_utc()} seeded reference snapshots")
+def bootstrap(engine, service) -> None:
+    jobs = [
+        ("States", fetch_states, "sql_states"),
+        ("Tribes", fetch_tribes, "sql_tribes"),
+        ("Casinos", fetch_casinos, "sql_casinos"),
+        ("account_select", fetch_account_select, "sql_account_select"),
+    ]
+    for tab, fn, snap in jobs:
+        values, index = fn(engine)
+        write_tab(service, tab, values)
+        save_snapshot(snap, {"rows": index})
+        print(f"{_utc()} bootstrap {tab}: {len(values) - 1} row(s)")
+    print(f"{_utc()} bootstrap complete")
 
 
 def main() -> None:
     load_env()
-    p = argparse.ArgumentParser(description="Reference tab sheet watcher")
+    p = argparse.ArgumentParser(description="SQL → Sheet reference tab watcher")
     p.add_argument("--once", action="store_true")
     p.add_argument(
-        "--seed-snapshots",
+        "--bootstrap",
         action="store_true",
-        help="Save current sheet state as baseline (no SQL writes)",
+        help="Write all reference tabs from SQL and seed snapshots",
     )
     args = p.parse_args()
 
     poll_sec = _float_env("EXPENSE_SHEET_REF_POLL_SECONDS", 30.0)
     engine = get_engine()
     service = sheets_service()
-    tab_root = root_tab()
 
-    if args.seed_snapshots:
-        seed_snapshots(service, tab_root)
+    if args.bootstrap:
+        bootstrap(engine, service)
         return
 
     print(
         f"{_utc()} expense_sheet_ref_watcher poll={poll_sec}s "
-        f"tabs=account_select,States,Tribes,Casinos,root:{tab_root!r}"
+        f"SQL→Sheet: clients.states, clients.tribes, clients.casinos, expense_account_gl_display"
     )
 
     while True:
         try:
             logs: list[str] = []
-            logs.extend(poll_account_select(engine, service))
             logs.extend(poll_states(engine, service))
             logs.extend(poll_tribes(engine, service))
             logs.extend(poll_casinos(engine, service))
-            logs.extend(poll_root_expense_accounts(engine, service, tab_root))
+            logs.extend(poll_account_select(engine, service))
             if logs:
                 for line in logs:
                     print(f"{_utc()} {line}")
             elif args.once:
-                print(f"{_utc()} no reference changes")
+                print(f"{_utc()} no SQL reference changes")
             if args.once:
                 break
             time.sleep(poll_sec)
