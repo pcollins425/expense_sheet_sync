@@ -25,3 +25,26 @@ services:
     restart: unless-stopped
     working_dir: /app/expense_sheet_out_watcher
     command: ["python", "-u", "run.py"]
+
+  expense-sheet-ref-watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: expense-sheet-sync:latest
+    env_file:
+      - secrets/.env
+    user: "${EXPENSE_SHEET_DOCKER_UID_GID:-1000:1000}"
+    volumes:
+      - ./secrets/.env:/app/secrets/.env:ro
+      - expense-sheet-ref-state:/app/state/ref_snapshots
+    environment:
+      MASTER_CREDENTIALS_ENV: /app/secrets/.env
+      EXPENSE_SHEET_REF_STATE_DIR: /app/state/ref_snapshots
+      EXPENSE_SHEET_REF_POLL_SECONDS: ${EXPENSE_SHEET_REF_POLL_SECONDS:-30}
+      TZ: ${TZ:-America/Chicago}
+    restart: unless-stopped
+    working_dir: /app/expense_sheet_ref_watcher
+    command: ["python", "-u", "run.py"]
+
+volumes:
+  expense-sheet-ref-state:
