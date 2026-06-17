@@ -82,7 +82,6 @@ def apply_root_label_replaces(service, replaces: list[LabelReplace]) -> list[str
             "findReplace": {
                 "find": r.old,
                 "replacement": r.new,
-                "sheetId": sid_num,
                 "matchCase": True,
                 "matchEntireCell": True,
                 "searchByRegex": False,
