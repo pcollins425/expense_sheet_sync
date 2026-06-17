@@ -28,3 +28,7 @@ docker compose run --rm expense-sheet-out-watcher python -u run.py --bootstrap
 ```
 
 Ensure `secrets/.env` has updated `GMAIL_*` with Apps Script scopes if using sheet tools from host.
+
+## Inbound (planned)
+
+Apps Script → `POST https://api.collinsmediallc.com/api/expense-sheet/inbound` → `finance.expense_sheet_in_queue` → inbound worker. No new Cloudflare tunnel if path lives under existing `/api/*` route.
