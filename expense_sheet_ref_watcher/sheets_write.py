@@ -18,12 +18,11 @@ def _retry_sleep(attempt: int) -> None:
     time.sleep(base * (2**attempt))
 
 
-def _execute_with_retry(fn, *, what: str) -> None:
+def _execute_with_retry(fn, *, what: str):
     max_attempts = int(os.environ.get("EXPENSE_SHEET_REF_MAX_RETRIES", "6"))
     for attempt in range(max_attempts):
         try:
-            fn()
-            return
+            return fn()
         except HttpError as e:
             if e.resp.status == 429 and attempt < max_attempts - 1:
                 wait = float(os.environ.get("EXPENSE_SHEET_REF_RETRY_SECONDS", "15")) * (

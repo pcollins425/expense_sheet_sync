@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Poll SQL reference tables → push quickbooks_export validation tabs → enqueue ESL refresh.
+Poll SQL reference tables → push validation tabs → find/replace on root when labels change.
 
-Sources:
-  clients.states   → States
-  clients.tribes   → Tribes
-  clients.casinos  → Casinos
-  finance.expense_account_gl_display → account_select
+Sources (SQL → Sheet only):
+  clients.states   → States   → root column H (state abbrev) on rename
+  clients.tribes   → Tribes   → root column G (tribe name) on rename
+  clients.casinos  → Casinos  → root column I (casino name) on rename
+
+account_select is supervisor-owned on the sheet (not synced from SQL).
 
   python -u run.py
   python -u run.py --once
-  python -u run.py --bootstrap   # force full tab write from SQL (no fan-out)
+  python -u run.py --bootstrap   # seed States/Tribes/Casinos from SQL
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from google_creds import sheets_service
 from poll import poll_all
 from sheets_write import batch_write_tabs
 from snapshot import save_snapshot
-from sql_fetch import fetch_account_select, fetch_casinos, fetch_states, fetch_tribes
+from sql_fetch import fetch_casinos, fetch_states, fetch_tribes
 
 
 def _utc() -> str:
@@ -44,14 +45,13 @@ def bootstrap(engine, service) -> None:
         ("States", fetch_states, "sql_states"),
         ("Tribes", fetch_tribes, "sql_tribes"),
         ("Casinos", fetch_casinos, "sql_casinos"),
-        ("account_select", fetch_account_select, "sql_account_select"),
     ]
     batch: dict[str, list[list[str]]] = {}
     for tab, fn, snap in jobs:
         values, index = fn(engine)
         batch[tab] = values
         save_snapshot(snap, {"rows": index})
-        print(f"{_utc()} bootstrap {tab}: {len(values) - 1} row(s) (queued)")
+        print(f"{_utc()} bootstrap {tab}: {len(values) - 1} row(s)")
 
     batch_write_tabs(service, batch)
     print(f"{_utc()} bootstrap complete ({len(batch)} tab(s), 1 batch write)")
@@ -64,7 +64,7 @@ def main() -> None:
     p.add_argument(
         "--bootstrap",
         action="store_true",
-        help="Write all reference tabs from SQL and seed snapshots",
+        help="Write States/Tribes/Casinos from SQL and seed snapshots",
     )
     args = p.parse_args()
 
@@ -78,7 +78,8 @@ def main() -> None:
 
     print(
         f"{_utc()} expense_sheet_ref_watcher poll={poll_sec}s "
-        f"SQL→Sheet: clients.states, clients.tribes, clients.casinos, expense_account_gl_display"
+        f"SQL→Sheet: clients.states, clients.tribes, clients.casinos "
+        f"(renames → root findReplace; no ESL queue fan-out)"
     )
 
     while True:

@@ -77,22 +77,23 @@ Failed rows retry until `EXPENSE_SHEET_MAX_ATTEMPTS`, then `status = dead`.
 
 ## Reference-tab watcher (SQL → Sheet)
 
-Polls SQL every `EXPENSE_SHEET_REF_POLL_SECONDS` (default 30). When reference data changes, rewrites the sheet tab and enqueues ESL rows on `root` for the outbound watcher.
+Polls SQL (`clients.states`, `clients.tribes`, `clients.casinos`) every `EXPENSE_SHEET_REF_POLL_SECONDS` (default 30).
 
-| SQL source | Sheet tab |
+| SQL change | Action |
 |---|---|
-| `clients.states` | `States` |
-| `clients.tribes` | `Tribes` |
-| `clients.casinos` | `Casinos` |
-| `finance.expense_account_gl_display` | `account_select` |
+| New / updated validation row | Rewrite tab (batched `batchUpdate`) |
+| Renamed display label | `findReplace` on `root` column G (tribe), H (state abbrev), or I (casino) — whole cell, one column |
+| `account_select` | **Not synced** — supervisor-owned on sheet |
+
+**No ESL queue fan-out** on reference changes.
+
+```bash
+docker compose run --rm expense-sheet-ref-watcher python -u run.py --bootstrap
+```
 
 Snapshots persist in Docker volume `expense-sheet-ref-state`.
 
 Google Sheets allows **60 read and 60 write requests/minute/user** (same OAuth user for both watchers).
 
-- **Ref watcher:** batches changed tabs into one `batchUpdate` per poll; retries on 429 (`EXPENSE_SHEET_REF_RETRY_SECONDS`, default 15). Run **`--bootstrap` once** after deploy.
-- **Outbound watcher:** one column-A read per queue drain cycle, batched row updates/appends per claimed batch, optional pause between batches (`EXPENSE_SHEET_BATCH_PAUSE_SECONDS`, default 1). Retries on 429 (`EXPENSE_SHEET_RETRY_SECONDS`, default 15).
-
-If the ref watcher fans out many ESL refreshes, the outbound queue may backlog — that is normal; batches pause to stay under quota.
-
-**Planned (see `PLANNING.md`):** replace fan-out with scoped `findReplace` on `root`; supervisor-owned new GL on sheet.
+- **Ref watcher:** batched tab writes + batched `findReplace` on renames; 429 retry (`EXPENSE_SHEET_REF_RETRY_SECONDS`, default 15).
+- **Outbound watcher:** one column-A read per queue drain, batched row writes, pause between batches (`EXPENSE_SHEET_BATCH_PAUSE_SECONDS`, default 1).
