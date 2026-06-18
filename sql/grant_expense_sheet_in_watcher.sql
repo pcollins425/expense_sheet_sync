@@ -36,7 +36,8 @@ GRANT SELECT ON [clients].[tribes] TO [' + REPLACE(@principal, N']', N']]') + N'
 GRANT SELECT ON [clients].[casinos] TO [' + REPLACE(@principal, N']', N']]') + N'];
 GRANT EXECUTE ON [finance].[usp_enqueue_expense_sheet_in] TO [' + REPLACE(@principal, N']', N']]') + N'];
 GRANT EXECUTE ON [finance].[usp_apply_expense_sheet_inbound] TO [' + REPLACE(@principal, N']', N']]') + N'];
-GRANT EXECUTE ON [finance].[usp_apply_expense_account_select_inbound] TO [' + REPLACE(@principal, N']', N']]') + N'];';
+GRANT EXECUTE ON [finance].[usp_apply_expense_account_select_inbound] TO [' + REPLACE(@principal, N']', N']]') + N'];
+GRANT EXECUTE ON [finance].[usp_try_materialize_expense_from_esl_amex] TO [' + REPLACE(@principal, N']', N']]') + N'];';
         EXEC sp_executesql @sql;
         PRINT N'Granted expense sheet inbound permissions to ' + @principal;
     END
