@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements-docker.txt \
 
 COPY expense_sheet_out_watcher/ /app/expense_sheet_out_watcher/
 COPY expense_sheet_ref_watcher/ /app/expense_sheet_ref_watcher/
+COPY expense_sheet_in_watcher/ /app/expense_sheet_in_watcher/
 COPY scripts/usb_env_dotenv.py scripts/__init__.py /app/scripts/
 
 ENV PYTHONUNBUFFERED=1 \

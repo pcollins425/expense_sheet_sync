@@ -9,9 +9,11 @@ Polls `finance.expense_sheet_out_queue` and writes rows to Google Sheets from `f
   - `2026-06-16_finance_expense_sheet_queues.sql`
   - `2026-06-16_finance_vw_expense_supervisor_sheet.sql`
   - `2026-06-16_finance_expense_sheet_ref_enqueue.sql`
+  - `2026-06-18_finance_expense_sheet_inbound.sql`
 - SQL grants for watcher login (`MSSQL_USER` in `secrets/.env`):
   - `sql/grant_expense_sheet_watcher.sql`
   - `sql/grant_expense_sheet_ref_watcher.sql`
+  - `sql/grant_expense_sheet_in_watcher.sql`
 - ESL backfill complete (`scripts/backfill_expense_supervisor_line.py --apply`)
 - Google OAuth refresh token with **Spreadsheets** scope (master credentials `GMAIL_*`)
 - Service account or user must have **edit** access to the target spreadsheet
@@ -32,12 +34,13 @@ cp secrets/.env.example secrets/.env   # create manually on Windows if needed
 docker compose up -d --build
 ```
 
-Compose runs two services:
+Compose runs three services:
 
 | Service | Role |
 |---|---|
 | `expense-sheet-out-watcher` | SQL queue → `root` tab (ESL lines) |
-| `expense-sheet-ref-watcher` | SQL reference tables → validation tabs + enqueue `root` refresh |
+| `expense-sheet-ref-watcher` | SQL reference tables → validation tabs + `findReplace` on renames |
+| `expense-sheet-in-watcher` | Sheet webhook → `expense_sheet_in_queue` → ESL / roots + GL catalog |
 
 First start of the ref watcher seeds SQL snapshots (no sheet writes). Bootstrap all reference tabs from SQL:
 
@@ -97,3 +100,33 @@ Google Sheets allows **60 read and 60 write requests/minute/user** (same OAuth u
 
 - **Ref watcher:** batched tab writes + batched `findReplace` on renames; 429 retry (`EXPENSE_SHEET_REF_RETRY_SECONDS`, default 15).
 - **Outbound watcher:** one column-A read per queue drain, batched row writes, pause between batches (`EXPENSE_SHEET_BATCH_PAUSE_SECONDS`, default 1).
+
+## Inbound (Sheet → SQL)
+
+`expense-sheet-in-watcher` runs the queue worker and an HTTP webhook on port **9020** (configurable).
+
+| Tab | SQL |
+|---|---|
+| `root` | ESL → `finance.expenses` / `finance.amex_landing` |
+| `account_select` | `finance.expense_account_gl_display` |
+
+Set in `secrets/.env`:
+
+```env
+EXPENSE_SHEET_INBOUND_SECRET=your-long-random-secret
+```
+
+Proxy `POST /api/expense-sheet/inbound` to `http://127.0.0.1:9020/api/expense-sheet/inbound` on the slot server (existing Cloudflare `/api/*` route), or point Apps Script at the Docker port directly during testing.
+
+**Apps Script** (bound project `expense_sheet_tools`):
+
+```bash
+python3 scripts/push_expense_sheet_apps_script.py
+```
+
+In the spreadsheet: **Expense sync → Install inbound triggers** (once). Set script properties:
+
+- `EXPENSE_SHEET_INBOUND_URL` — webhook URL
+- `EXPENSE_SHEET_INBOUND_SECRET` — same value as `secrets/.env`
+
+**Editable `root` columns:** Date, Amount, Comments, Description, State, Tribe, Casino, Expense Account. Card Member and Receipt are read-only. Casino edit updates tribe/state on the sheet (Apps Script) and in SQL (derived from casino FK). State/tribe-only edits clear casino when it no longer matches.

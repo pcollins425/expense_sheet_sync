@@ -46,5 +46,28 @@ services:
     working_dir: /app/expense_sheet_ref_watcher
     command: ["python", "-u", "run.py"]
 
+  expense-sheet-in-watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: expense-sheet-sync:latest
+    env_file:
+      - secrets/.env
+    user: "${EXPENSE_SHEET_DOCKER_UID_GID:-1000:1000}"
+    ports:
+      - "${EXPENSE_SHEET_INBOUND_PORT:-9020}:9020"
+    volumes:
+      - ./secrets/.env:/app/secrets/.env:ro
+    environment:
+      MASTER_CREDENTIALS_ENV: /app/secrets/.env
+      EXPENSE_SHEET_INBOUND_HOST: 0.0.0.0
+      EXPENSE_SHEET_INBOUND_PORT: 9020
+      EXPENSE_SHEET_INBOUND_WEBHOOK: "1"
+      EXPENSE_SHEET_IN_POLL_SECONDS: ${EXPENSE_SHEET_IN_POLL_SECONDS:-15}
+      TZ: ${TZ:-America/Chicago}
+    restart: unless-stopped
+    working_dir: /app/expense_sheet_in_watcher
+    command: ["python", "-u", "run.py"]
+
 volumes:
   expense-sheet-ref-state:
