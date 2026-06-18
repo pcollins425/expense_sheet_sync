@@ -20,6 +20,7 @@ COPY scripts/usb_env_dotenv.py scripts/__init__.py /app/scripts/
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
     MASTER_CREDENTIALS_ENV=/app/secrets/.env \
     EXPENSE_SHEET_REF_STATE_DIR=/app/state/ref_snapshots
 
