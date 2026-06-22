@@ -49,3 +49,5 @@ python3 scripts/push_expense_sheet_apps_script.py
 ```
 
 Set `EXPENSE_SHEET_INBOUND_SECRET` in `secrets/.env` and Apps Script project properties (`EXPENSE_SHEET_INBOUND_URL`, `EXPENSE_SHEET_INBOUND_SECRET`). Run **Expense sync → Install inbound triggers** once on the sheet.
+
+**Public URL (preferred):** dedicated hostname `expense-inbound.collinsmediallc.com` → `:9020` (not path routing on `api`). See `agents/knowledge/finance_expense_supervisor_line.md` § Cloudflare.

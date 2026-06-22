@@ -10,6 +10,8 @@ Polls `finance.expense_sheet_out_queue` and writes rows to Google Sheets from `f
   - `2026-06-16_finance_vw_expense_supervisor_sheet.sql`
   - `2026-06-16_finance_expense_sheet_ref_enqueue.sql`
   - `2026-06-18_finance_expense_sheet_inbound.sql`
+  - `2026-06-19_finance_expense_sheet_inbound_materialize_expense.sql`
+  - `2026-06-20_finance_override_receipt_sheet_two_way.sql`
 - SQL grants for watcher login (`MSSQL_USER` in `secrets/.env`):
   - `sql/grant_expense_sheet_watcher.sql`
   - `sql/grant_expense_sheet_ref_watcher.sql`
@@ -67,7 +69,9 @@ python -u run.py --once
 
 ## Column layout (row 1)
 
-`reference_key` | `Date` | `Card Member` | `Amount` | `Comments` | `Description` | `Tribe/Dynamic location` | `State` | `Casino/Dynamic location` | `Expense Account` | `Receipt`
+`reference_key` | `Date` | `Card Member` | `Amount` | `Comments` | `Description` | `Tribe/Dynamic location` | `State` | `Casino/Dynamic location` | `Expense Account` | `Receipt` | `Override Receipt`
+
+Column **L** (`Override Receipt`) is a checkbox synced with `finance.expenses.override_receipt` (two-way via Apps Script inbound + outbound watcher).
 
 Column **A** (`reference_key` = `ESL-…`) is the sync anchor for upsert/delete.
 

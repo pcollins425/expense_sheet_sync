@@ -27,28 +27,40 @@ HEADERS = [
     "Casino/Dynamic location",
     "Expense Account",
     "Receipt",
+    "Override Receipt",
 ]
 
 LAST_COL = "K"
+HEADER_LAST_COL = "L"
+OVERRIDE_RECEIPT_COL = "L"
 _BLANK_ROW = [[""] * len(HEADERS)]
 _UPDATED_RANGE_RE = re.compile(r"!A(\d+)", re.IGNORECASE)
 
-ROW_SQL = text(
-    """
+_SHEET_ROW_SELECT = """
     SELECT
-        esl_reference_key,
-        [date],
-        card_member,
-        amount,
-        comments,
-        description,
-        tribe_dynamic_location,
-        [state],
-        casino_dynamic_location,
-        expense_account,
-        receipt
-    FROM finance.vw_expense_supervisor_sheet
-    WHERE esl_reference_key = :hub_key
+        v.esl_reference_key,
+        v.[date],
+        v.card_member,
+        v.amount,
+        v.comments,
+        v.description,
+        v.tribe_dynamic_location,
+        v.[state],
+        v.casino_dynamic_location,
+        v.expense_account,
+        v.receipt,
+        CAST(COALESCE(ex.override_receipt, esl.override_receipt, 0) AS bit) AS override_receipt
+    FROM finance.vw_expense_supervisor_sheet v
+    INNER JOIN finance.expense_supervisor_line esl
+        ON esl.reference_key = v.esl_reference_key
+    LEFT JOIN finance.expenses ex
+        ON ex.reference_key = esl.expense_id
+"""
+
+ROW_SQL = text(
+    _SHEET_ROW_SELECT
+    + """
+    WHERE v.esl_reference_key = :hub_key
     """
 )
 
@@ -91,6 +103,44 @@ def _row_values(mapping: dict[str, Any]) -> list[str]:
         _cell_str(mapping.get("expense_account")),
         _cell_str(mapping.get("receipt")),
     ]
+
+
+def _override_receipt_bool(mapping: dict[str, Any]) -> bool:
+    val = mapping.get("override_receipt")
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, Decimal)):
+        return bool(int(val))
+    return str(val).strip().upper() in ("1", "TRUE", "YES", "Y")
+
+
+def _override_receipt_batch_data(
+    tab: str, row_num: int, mapping: dict[str, Any] | None
+) -> dict[str, Any]:
+    return {
+        "range": f"{tab}!{OVERRIDE_RECEIPT_COL}{row_num}",
+        "values": [[_override_receipt_bool(mapping or {})]],
+    }
+
+
+def _batch_override_receipt_update(
+    service, data: list[dict[str, Any]], *, what: str
+) -> None:
+    if not data:
+        return
+    sid = sheet_id()
+    _execute_with_retry(
+        lambda: service.spreadsheets()
+        .values()
+        .batchUpdate(
+            spreadsheetId=sid,
+            body={"valueInputOption": "USER_ENTERED", "data": data},
+        )
+        .execute(),
+        what=what,
+    )
 
 
 def _retry_seconds() -> float:
@@ -147,7 +197,7 @@ def ensure_tab_and_headers(service) -> None:
             what=f"add tab {tab}",
         )
 
-    rng = f"{_escape_tab(tab)}!A1:{LAST_COL}1"
+    rng = f"{_escape_tab(tab)}!A1:{HEADER_LAST_COL}1"
     _execute_with_retry(
         lambda: service.spreadsheets()
         .values()
@@ -282,6 +332,7 @@ def publish_batch(
         return results
 
     batch_data: list[dict[str, Any]] = []
+    override_data: list[dict[str, Any]] = []
     append_values: list[list[str]] = []
     append_items: list[PreparedItem] = []
 
@@ -295,6 +346,7 @@ def publish_batch(
                         "values": _BLANK_ROW,
                     }
                 )
+                override_data.append(_override_receipt_batch_data(tab, row_num, None))
             continue
 
         assert item.row_data is not None
@@ -309,6 +361,9 @@ def publish_batch(
                     "range": f"{tab}!A{row_num}:{LAST_COL}{row_num}",
                     "values": values,
                 }
+            )
+            override_data.append(
+                _override_receipt_batch_data(tab, row_num, item.row_data)
             )
 
     try:
@@ -333,7 +388,18 @@ def publish_batch(
             updated_range = (result.get("updates") or {}).get("updatedRange") or ""
             start_row = _first_row_from_updated_range(updated_range)
             for offset, item in enumerate(append_items):
-                index_cache[item.hub_key] = start_row + offset
+                row_num = start_row + offset
+                index_cache[item.hub_key] = row_num
+                assert item.row_data is not None
+                override_data.append(
+                    _override_receipt_batch_data(tab, row_num, item.row_data)
+                )
+
+        _batch_override_receipt_update(
+            service,
+            override_data,
+            what=f"override receipt {len(override_data)} cell(s)",
+        )
 
         results.extend((item, None) for item in prepared)
     except Exception as e:
@@ -368,12 +434,23 @@ def upsert_row(service, engine, hub_key: str, index_cache: dict[str, int] | None
             what=f"append {hub_key}",
         )
         updated_range = (result.get("updates") or {}).get("updatedRange") or ""
-        cache[hub_key] = _first_row_from_updated_range(updated_range)
+        row_num = _first_row_from_updated_range(updated_range)
+        cache[hub_key] = row_num
+        _batch_override_receipt_update(
+            service,
+            [_override_receipt_batch_data(tab, row_num, row)],
+            what=f"override receipt {hub_key}",
+        )
         return
 
     _batch_values_update(
         service,
         [{"range": f"{tab}!A{row_num}:{LAST_COL}{row_num}", "values": values}],
+    )
+    _batch_override_receipt_update(
+        service,
+        [_override_receipt_batch_data(tab, row_num, row)],
+        what=f"override receipt {hub_key}",
     )
 
 
@@ -387,6 +464,11 @@ def delete_row(service, hub_key: str, index_cache: dict[str, int] | None = None)
         service,
         [{"range": f"{tab}!A{row_num}:{LAST_COL}{row_num}", "values": _BLANK_ROW}],
     )
+    _batch_override_receipt_update(
+        service,
+        [_override_receipt_batch_data(tab, row_num, None)],
+        what=f"clear override receipt {hub_key}",
+    )
 
 
 def bootstrap_all(engine, service) -> int:
@@ -394,21 +476,9 @@ def bootstrap_all(engine, service) -> int:
     with engine.connect() as conn:
         rows = conn.execute(
             text(
-                """
-                SELECT
-                    esl_reference_key,
-                    [date],
-                    card_member,
-                    amount,
-                    comments,
-                    description,
-                    tribe_dynamic_location,
-                    [state],
-                    casino_dynamic_location,
-                    expense_account,
-                    receipt
-                FROM finance.vw_expense_supervisor_sheet
-                ORDER BY [date] DESC, esl_reference_key DESC
+                _SHEET_ROW_SELECT
+                + """
+                ORDER BY v.[date] DESC, v.esl_reference_key DESC
                 """
             )
         ).mappings().all()
@@ -421,13 +491,15 @@ def bootstrap_all(engine, service) -> int:
 
     sid = sheet_id()
     tab = sheet_tab()
+    tab_escaped = _escape_tab(tab)
     chunk = int(os.environ.get("EXPENSE_SHEET_BOOTSTRAP_CHUNK", "500"))
     start_row = 2
     for i in range(0, len(values), chunk):
         block = values[i : i + chunk]
+        row_dicts = [dict(r) for r in rows[i : i + chunk]]
         row_start = start_row + i
         row_end = row_start + len(block) - 1
-        rng = f"{_escape_tab(tab)}!A{row_start}:{LAST_COL}{row_end}"
+        rng = f"{tab_escaped}!A{row_start}:{LAST_COL}{row_end}"
         _execute_with_retry(
             lambda block=block, rng=rng: service.spreadsheets()
             .values()
@@ -440,17 +512,15 @@ def bootstrap_all(engine, service) -> int:
             .execute(),
             what=f"bootstrap chunk rows {row_start}-{row_end}",
         )
-    _execute_with_retry(
-        lambda: service.spreadsheets()
-        .values()
-        .clear(
-            spreadsheetId=sid,
-            range=f"{_escape_tab(tab)}!L:L",
-            body={},
+        override_data = [
+            _override_receipt_batch_data(tab_escaped, row_start + offset, row_dict)
+            for offset, row_dict in enumerate(row_dicts)
+        ]
+        _batch_override_receipt_update(
+            service,
+            override_data,
+            what=f"bootstrap override rows {row_start}-{row_end}",
         )
-        .execute(),
-        what=f"clear legacy column on {tab}",
-    )
     return len(values)
 
 
