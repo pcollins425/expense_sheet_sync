@@ -33,7 +33,9 @@ HEADERS = [
 LAST_COL = "K"
 HEADER_LAST_COL = "L"
 OVERRIDE_RECEIPT_COL = "L"
-_BLANK_ROW = [[""] * len(HEADERS)]
+# A–K data only; Override Receipt (L) is written separately.
+_DATA_COLS = len(HEADERS) - 1
+_BLANK_ROW = [[""] * _DATA_COLS]
 _UPDATED_RANGE_RE = re.compile(r"!A(\d+)", re.IGNORECASE)
 
 _SHEET_ROW_SELECT = """
@@ -318,7 +320,8 @@ def publish_batch(
             if op != "delete":
                 row_data = fetch_row(engine, hub_key)
                 if row_data is None:
-                    raise ValueError(f"ESL row not found in database: {hub_key}")
+                    # ESL recycled/merged away after enqueue — blank sheet instead of dead.
+                    op = "delete"
             prepared.append(
                 PreparedItem(queue_id=qid, hub_key=hub_key, op=op, row_data=row_data)
             )
