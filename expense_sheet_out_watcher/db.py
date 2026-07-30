@@ -6,7 +6,10 @@ import urllib.parse
 
 from sqlalchemy import create_engine
 
-from config import load_env
+try:
+    from expense_sheet_out_watcher.config import load_env
+except ImportError:  # running with cwd = expense_sheet_out_watcher
+    from config import load_env
 
 
 def _env(key: str, default: str = "") -> str:
