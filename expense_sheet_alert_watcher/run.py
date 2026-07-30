@@ -82,7 +82,12 @@ def maybe_daily(engine, *, force: bool = False) -> bool:
             return False
         if chicago_hour() < hour:
             return False
-    rid = send_daily_digest(engine)
+    try:
+        rid = send_daily_digest(engine)
+    except Exception as exc:
+        # Do not mark the day sent — retry next poll / tomorrow after key fix.
+        print(f"{utc_stamp()} daily digest FAILED: {exc}", flush=True)
+        return False
     _write_last_daily(today)
     print(f"{utc_stamp()} daily digest sent resend_id={rid} day={today}", flush=True)
     return True
