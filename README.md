@@ -2,6 +2,33 @@
 
 Polls `finance.expense_sheet_out_queue` and writes rows to Google Sheets from `finance.vw_expense_supervisor_sheet`.
 
+## Server deploy (canonical)
+
+**The slot server pulls only one repo:** [pcollins425/expense_sheet_sync](https://github.com/pcollins425/expense_sheet_sync) (clone path e.g. `E:\expense_sheet_sync`).
+
+| Repo | Role |
+|---|---|
+| **`cursor-assistant`** | Develop here (`deploy/expense_sheet_sync/`, root `expense_sheet_*_watcher/`, SQL migrations, Apps Script source). |
+| **`expense_sheet_sync`** | **Deploy artifact** — must be pushed before you `git pull` on the server. |
+
+After any change under `deploy/expense_sheet_sync/` (or watchers copied into it):
+
+```bash
+# From cursor-assistant (WSL)
+bash scripts/push_expense_sheet_sync_deploy.sh "Short commit message"
+```
+
+Then on the slot server:
+
+```bash
+cd expense_sheet_sync
+git pull
+docker compose build --no-cache
+docker compose up -d
+```
+
+Do **not** mix `git pull` on `cursor-assistant` + `cd deploy/expense_sheet_sync` for production tests unless that clone is what the server actually runs. One pull location only.
+
 ## Prerequisites
 
 - SQL migrations applied on `dgs_application_db`:
@@ -36,13 +63,32 @@ cp secrets/.env.example secrets/.env   # create manually on Windows if needed
 docker compose up -d --build
 ```
 
-Compose runs three services:
+Compose runs four services:
 
 | Service | Role |
 |---|---|
 | `expense-sheet-out-watcher` | SQL queue → `root` tab (ESL lines) |
 | `expense-sheet-ref-watcher` | SQL reference tables → validation tabs + `findReplace` on renames |
 | `expense-sheet-in-watcher` | Sheet webhook → `expense_sheet_in_queue` → ESL / roots + GL catalog |
+| `expense-sheet-alert-watcher` | Reclaim stale `processing`; Resend **event** on dead + **daily** digest |
+
+## Alerts (Resend)
+
+Silent dead/stuck queues are a drift risk. Alerts use **Resend** (`RESEND_API_KEY` in `secrets/.env`).
+
+| Mode | When |
+|---|---|
+| **Event** | In/out watcher marks a queue row **dead** (after max attempts) → immediate email |
+| **Daily** | Alert watcher once per Chicago day at `EXPENSE_SHEET_ALERT_DAILY_HOUR` (default 8) → counts + dead samples |
+
+Also reclaims `processing` older than `EXPENSE_SHEET_STALE_PROCESSING_MINUTES` (default 30) back to `pending`.
+
+```bash
+# Force today's digest (idempotent per day via Resend key)
+docker compose run --rm expense-sheet-alert-watcher python -u run.py --daily-now
+```
+
+Default to: `paulc@dynamicgamingsolutions.com` (`EXPENSE_SHEET_ALERT_TO`).
 
 First start of the ref watcher seeds SQL snapshots (no sheet writes). Bootstrap all reference tabs from SQL:
 

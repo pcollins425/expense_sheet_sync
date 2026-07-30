@@ -79,7 +79,21 @@ def delete_done(engine, queue_id: int) -> None:
 
 def backoff_fail(engine, queue_id: int, err: str, max_attempts: int) -> None:
     truncated = err[:3890]
+    became_dead = False
+    hub_key = None
+    attempts_after = 0
     with engine.begin() as conn:
+        before = conn.execute(
+            text(
+                "SELECT attempt_count, hub_reference_key "
+                "FROM finance.expense_sheet_in_queue WHERE queue_id = :q"
+            ),
+            {"q": queue_id},
+        ).mappings().first()
+        prev_attempts = int((before or {}).get("attempt_count") or 0)
+        hub_key = (before or {}).get("hub_reference_key")
+        became_dead = prev_attempts + 1 >= max_attempts
+        attempts_after = prev_attempts + 1
         conn.execute(
             text(
                 """
@@ -98,6 +112,19 @@ def backoff_fail(engine, queue_id: int, err: str, max_attempts: int) -> None:
             ),
             {"q": queue_id, "last_err": truncated, "mx": max_attempts},
         )
+    if became_dead:
+        try:
+            from expense_sheet_common.alerts import notify_queue_dead
+
+            notify_queue_dead(
+                direction="in",
+                queue_id=queue_id,
+                hub_key=hub_key,
+                attempt_count=attempts_after,
+                last_error=truncated,
+            )
+        except Exception as alert_exc:
+            print(f"{_utc_stamp()} dead alert failed: {alert_exc}", flush=True)
 
 
 def process_batch(engine, rows: list[dict], *, max_attempts: int) -> None:

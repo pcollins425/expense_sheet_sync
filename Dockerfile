@@ -16,6 +16,8 @@ RUN pip install --no-cache-dir -r /tmp/requirements-docker.txt \
 COPY expense_sheet_out_watcher/ /app/expense_sheet_out_watcher/
 COPY expense_sheet_ref_watcher/ /app/expense_sheet_ref_watcher/
 COPY expense_sheet_in_watcher/ /app/expense_sheet_in_watcher/
+COPY expense_sheet_alert_watcher/ /app/expense_sheet_alert_watcher/
+COPY expense_sheet_common/ /app/expense_sheet_common/
 COPY scripts/usb_env_dotenv.py scripts/__init__.py /app/scripts/
 
 ENV PYTHONUNBUFFERED=1 \
@@ -25,6 +27,6 @@ ENV PYTHONUNBUFFERED=1 \
     EXPENSE_SHEET_REF_STATE_DIR=/app/state/ref_snapshots
 
 RUN useradd -m -u 1000 sheetapp \
-    && mkdir -p /app/state/ref_snapshots \
+    && mkdir -p /app/state/ref_snapshots /app/state/alerts \
     && chown -R sheetapp:sheetapp /app
 USER sheetapp
