@@ -405,8 +405,20 @@ def publish_batch(
         )
 
         results.extend((item, None) for item in prepared)
-    except Exception as e:
-        results.extend((item, e) for item in prepared)
+    except Exception:
+        # values.batchUpdate is all-or-nothing: one malformed entry rejects every
+        # range in the request. Re-apply per item so a single bad row cannot bury
+        # the rest of the batch. Both paths are idempotent, so replaying writes
+        # that may already have landed is safe.
+        for item in prepared:
+            try:
+                if item.op == "delete":
+                    delete_row(service, item.hub_key, index_cache)
+                else:
+                    upsert_row(service, engine, item.hub_key, index_cache)
+                results.append((item, None))
+            except Exception as item_exc:
+                results.append((item, item_exc))
 
     return results
 
